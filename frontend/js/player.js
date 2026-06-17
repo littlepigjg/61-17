@@ -74,6 +74,7 @@ class RadioPlayer {
 
     this._disconnectAudioStream();
     this.notifyLeave();
+    this.hideBlacklistNotice();
 
     if (this.ws) {
       try { this.ws.close(); } catch (e) {}
@@ -88,11 +89,13 @@ class RadioPlayer {
 
   connectWebSocket(channelId) {
     this.ws = new WebSocket(CONFIG.WS_URL);
+    const userId = this._getUserId();
 
     this.ws.onopen = () => {
       this.ws.send(JSON.stringify({
         action: 'join',
-        channelId: channelId
+        channelId: channelId,
+        userId: userId
       }));
     };
 
@@ -131,6 +134,9 @@ class RadioPlayer {
       case 'volumeChange':
         this.serverVolume = data.volume;
         this._applyCombinedVolume();
+        break;
+      case 'blacklisted':
+        this.handleBlacklisted(data);
         break;
     }
   }
@@ -175,17 +181,96 @@ class RadioPlayer {
     this.listenerCount.textContent = count;
   }
 
+  handleBlacklisted(data) {
+    let message = '您已被禁止访问此频道';
+    if (data.reason) {
+      message = `您已被禁止访问此频道：${data.reason}`;
+    }
+    if (data.expiresAt) {
+      const expireDate = new Date(data.expiresAt);
+      message += `（解禁时间：${expireDate.toLocaleString()}）`;
+    }
+    this.showBlacklistNotice(message);
+    this._disconnectAudioStream();
+    this.playBtn.disabled = true;
+  }
+
+  showBlacklistNotice(message) {
+    let notice = document.getElementById('blacklistNotice');
+    if (!notice) {
+      notice = document.createElement('div');
+      notice.id = 'blacklistNotice';
+      notice.className = 'blacklist-notice';
+      document.querySelector('.player-card').insertBefore(notice, document.querySelector('.channel-info'));
+    }
+    notice.innerHTML = `
+      <div class="blacklist-notice-content">
+        <span class="blacklist-notice-icon">🚫</span>
+        <div>
+          <div class="blacklist-notice-title">访问被拒绝</div>
+          <div class="blacklist-notice-message">${message}</div>
+        </div>
+      </div>
+    `;
+    notice.style.display = 'block';
+  }
+
+  hideBlacklistNotice() {
+    const notice = document.getElementById('blacklistNotice');
+    if (notice) {
+      notice.style.display = 'none';
+    }
+  }
+
+  _getUserId() {
+    try {
+      const match = document.cookie.match(/(?:^|;\s*)listener_uid=([^;]+)/);
+      if (match) {
+        return match[1];
+      }
+    } catch (e) {}
+    return null;
+  }
+
   updatePlayerUI(channelId) {
     document.querySelectorAll('.channel-item').forEach(item => {
       item.classList.toggle('active', item.dataset.id === channelId);
     });
   }
 
-  _connectAudioStream() {
+  async _connectAudioStream() {
     if (!this.currentChannel) return;
     const streamUrl = `${CONFIG.API_BASE}/stream/${this.currentChannel}`;
-    this.audio.src = streamUrl;
-    this.playBtn.disabled = false;
+
+    try {
+      const controller = new AbortController();
+      const signal = controller.signal;
+      const response = await fetch(streamUrl, {
+        method: 'GET',
+        signal: signal,
+        credentials: 'same-origin'
+      });
+
+      if (response.status === 403) {
+        const text = await response.text();
+        this.showBlacklistNotice(text || '您已被禁止访问此频道');
+        this.playBtn.disabled = true;
+        return;
+      }
+
+      if (!response.ok) {
+        console.error('Stream connection failed:', response.status);
+        return;
+      }
+
+      this.hideBlacklistNotice();
+      this.audio.src = streamUrl;
+      this.playBtn.disabled = false;
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        console.error('Stream check failed:', err);
+      }
+    }
   }
 
   _disconnectAudioStream() {
@@ -249,11 +334,12 @@ class RadioPlayer {
   }
 
   bindEvents() {
-    this.playBtn.addEventListener('click', () => {
+    this.playBtn.addEventListener('click', async () => {
       if (this.audio.paused || this.audio.src === '') {
         if (!this.audio.src) {
-          this._connectAudioStream();
+          await this._connectAudioStream();
         }
+        if (this.playBtn.disabled) return;
         this.audio.play().then(() => {
         }).catch(err => {
           console.error('Play failed:', err);

@@ -66,10 +66,78 @@
             <div class="playlist" id="playlist">
             </div>
           </div>
+
+          <div class="blacklist-section">
+            <div class="blacklist-header">
+              <h3>黑名单管理</h3>
+              <div class="blacklist-actions">
+                <button id="addBlacklistBtn" class="action-btn">➕ 添加</button>
+                <button id="importBlacklistBtn" class="action-btn secondary">📥 导入</button>
+                <button id="exportBlacklistBtn" class="action-btn secondary">📤 导出</button>
+                <button id="clearBlacklistBtn" class="action-btn danger">🗑️ 清空</button>
+              </div>
+            </div>
+            <div class="blacklist-stats">
+              <span class="stat-label">黑名单数量:</span>
+              <span class="stat-value" id="blacklistCount">0</span>
+            </div>
+            <div class="blacklist" id="blacklist">
+            </div>
+          </div>
         </div>
       </section>
     </main>
   </div>
+
+  <div class="modal-overlay" id="blacklistModal" style="display:none;">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>添加到黑名单</h3>
+        <button class="modal-close" id="closeModalBtn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>黑名单类型</label>
+          <select id="blacklistType">
+            <option value="ip">单个 IP 地址</option>
+            <option value="ip_cidr">IP 段 (CIDR)</option>
+            <option value="ip_range">IP 范围</option>
+            <option value="user">用户标识 (UID)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label id="valueLabel">IP 地址</label>
+          <input type="text" id="blacklistValue" placeholder="例如: 192.168.1.100">
+          <small class="hint" id="valueHint">输入要屏蔽的 IP 地址</small>
+        </div>
+        <div class="form-group">
+          <label>屏蔽原因（可选）</label>
+          <input type="text" id="blacklistReason" placeholder="例如: 恶意请求、违规行为">
+        </div>
+        <div class="form-group">
+          <label>有效期</label>
+          <select id="blacklistDuration">
+            <option value="0">永久</option>
+            <option value="3600">1 小时</option>
+            <option value="86400">1 天</option>
+            <option value="604800">1 周</option>
+            <option value="2592000">1 个月</option>
+            <option value="custom">自定义...</option>
+          </select>
+        </div>
+        <div class="form-group" id="customDurationGroup" style="display:none;">
+          <label>自定义有效期（秒）</label>
+          <input type="number" id="customDuration" min="1" placeholder="例如: 300 表示 5 分钟">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn secondary" id="cancelModalBtn">取消</button>
+        <button class="action-btn" id="confirmBlacklistBtn">确认添加</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="importFileInput" accept=".json" style="display:none;">
 
   <script src="js/config.js"></script>
   <script src="js/dj.js"></script>

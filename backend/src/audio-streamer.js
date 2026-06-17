@@ -31,6 +31,7 @@ class AudioStreamer extends EventEmitter {
     this._isPlaying = new Map();
     this.listenerManager = new ListenerManager();
     this._connectionMap = new Map();
+    this._wsServer = null;
 
     this.listenerManager.on('listenersChange', (channelId, count) => {
       const channel = this.channelManager.getChannel(channelId);
@@ -68,6 +69,10 @@ class AudioStreamer extends EventEmitter {
         this._startPlayback(channelId, track, position);
       }
     });
+  }
+
+  setWebSocketServer(wsServer) {
+    this._wsServer = wsServer;
   }
 
   _startPlayback(channelId, track, startPosition = 0) {
@@ -257,7 +262,7 @@ class AudioStreamer extends EventEmitter {
     }
   }
 
-  createClientStream(channelId, userId = null, replaceUser = false) {
+  createClientStream(channelId, userId = null, replaceUser = false, clientIp = null) {
     if (replaceUser && userId) {
       this.removeStreamsForUserOnChannel(channelId, userId);
     }
@@ -277,7 +282,7 @@ class AudioStreamer extends EventEmitter {
     if (!clientStream) return null;
 
     const connectionId = this.listenerManager.addListener(channelId, userId);
-    this._connectionMap.set(clientStream, { channelId, connectionId, touchTimer: null });
+    this._connectionMap.set(clientStream, { channelId, connectionId, touchTimer: null, ip: clientIp, userId });
 
     const handleData = () => {
       const info = this._connectionMap.get(clientStream);
@@ -389,6 +394,72 @@ class AudioStreamer extends EventEmitter {
     }
     this.listenerManager.removeAllForUser(userId);
     return channelConnections.size;
+  }
+
+  removeStreamsByIp(channelId, ip) {
+    if (!ip) return 0;
+    let removed = 0;
+    for (const [stream, info] of this._connectionMap.entries()) {
+      if (channelId && info.channelId !== channelId) continue;
+      if (info.ip === ip) {
+        removed++;
+        const distributor = this.distributors.get(info.channelId);
+        try {
+          if (info.touchTimer) {
+            clearInterval(info.touchTimer);
+          }
+        } catch (e) {}
+        try {
+          if (distributor) {
+            distributor.removeClient(stream);
+          }
+        } catch (e) {}
+        try {
+          stream.destroy();
+        } catch (e) {}
+        this._connectionMap.delete(stream);
+        this.listenerManager.removeListener(info.channelId, info.connectionId);
+      }
+    }
+    return removed;
+  }
+
+  removeStreamsByBlacklistCheck(channelId, blacklistManager, onRemoveCallback = null) {
+    if (!blacklistManager) return 0;
+    let removed = 0;
+    const toRemove = [];
+    for (const [stream, info] of this._connectionMap.entries()) {
+      if (channelId && info.channelId !== channelId) continue;
+      const connInfo = this.listenerManager.getConnectionInfo(info.connectionId, info.channelId);
+      const userId = connInfo ? connInfo.userId : info.userId;
+      const check = blacklistManager.isBlacklisted(info.channelId, info.ip, userId);
+      if (check.blacklisted) {
+        toRemove.push({ stream, info, userId, entry: check.entry });
+      }
+    }
+    for (const { stream, info, userId, entry } of toRemove) {
+      removed++;
+      if (onRemoveCallback) {
+        try { onRemoveCallback(userId, info.ip, entry); } catch (e) {}
+      }
+      const distributor = this.distributors.get(info.channelId);
+      try {
+        if (info.touchTimer) {
+          clearInterval(info.touchTimer);
+        }
+      } catch (e) {}
+      try {
+        if (distributor) {
+          distributor.removeClient(stream);
+        }
+      } catch (e) {}
+      try {
+        stream.destroy();
+      } catch (e) {}
+      this._connectionMap.delete(stream);
+      this.listenerManager.removeListener(info.channelId, info.connectionId);
+    }
+    return removed;
   }
 
   shutdown() {

@@ -2,11 +2,13 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const { execSync } = require('child_process');
 const config = require('../config.json');
 const ChannelManager = require('./channel-manager');
 const AudioStreamer = require('./audio-streamer');
 const WebSocketServer = require('./ws-server');
+const BlacklistManager = require('./blacklist-manager');
 
 let ffmpegAvailable = false;
 try {
@@ -63,8 +65,22 @@ channelManager.init();
 
 const audioStreamer = new AudioStreamer(channelManager);
 
+const dataDir = path.join(__dirname, '../data');
+const blacklistManager = new BlacklistManager(dataDir);
+
 const wsServer = new WebSocketServer(config.wsPort, channelManager, ffmpegAvailable);
 wsServer.start();
+
+audioStreamer.setWebSocketServer(wsServer);
+
+blacklistManager.on('entryAdded', (channelId, entry) => {
+  const removed = audioStreamer.removeStreamsByBlacklistCheck(channelId, blacklistManager, (userId, ip, removedEntry) => {
+    wsServer.sendBlacklistNotification(channelId, userId, ip, removedEntry);
+  });
+  if (removed > 0) {
+    console.log(`[Blacklist] Disconnected ${removed} listener(s) from channel ${channelId} due to new blacklist entry`);
+  }
+});
 
 app.get('/api/channels', (req, res) => {
   const channels = channelManager.getAllChannels();
@@ -146,9 +162,27 @@ app.get('/stream/:channelId', (req, res) => {
   const channelId = req.params.channelId;
   const channel = channelManager.getChannel(channelId);
   const userId = req.listenerUid;
+  const clientIp = req.ip || req.connection.remoteAddress ||
+    req.socket.remoteAddress ||
+    (req.connection.socket ? req.connection.socket.remoteAddress : null);
 
   if (!channel) {
     return res.status(404).send('Channel not found');
+  }
+
+  const blacklistCheck = blacklistManager.isBlacklisted(channelId, clientIp, userId);
+  if (blacklistCheck.blacklisted) {
+    const entry = blacklistCheck.entry;
+    let reasonMsg = '您已被禁止访问此频道';
+    if (entry.reason) {
+      reasonMsg = `您已被禁止访问此频道：${entry.reason}`;
+    }
+    if (entry.expiresAt) {
+      const expireDate = new Date(entry.expiresAt);
+      reasonMsg += `（解禁时间：${expireDate.toLocaleString()}）`;
+    }
+    res.status(403).type('text/plain; charset=utf-8').send(reasonMsg);
+    return;
   }
 
   let contentType = 'audio/mpeg';
@@ -170,7 +204,7 @@ app.get('/stream/:channelId', (req, res) => {
   res.setHeader('Accept-Ranges', 'none');
   res.status(200);
 
-  const result = audioStreamer.createClientStream(channelId, userId, true);
+  const result = audioStreamer.createClientStream(channelId, userId, true, clientIp);
   if (!result) {
     res.end();
     return;
@@ -236,6 +270,128 @@ app.get('/api/config', (req, res) => {
   });
 });
 
+app.get('/api/channels/:channelId/blacklist', (req, res) => {
+  const channel = channelManager.getChannel(req.params.channelId);
+  if (!channel) {
+    return res.status(404).json({ error: 'Channel not found' });
+  }
+  const entries = blacklistManager.getEntries(req.params.channelId);
+  res.json(entries);
+});
+
+app.post('/api/channels/:channelId/blacklist', (req, res) => {
+  const channel = channelManager.getChannel(req.params.channelId);
+  if (!channel) {
+    return res.status(404).json({ error: 'Channel not found' });
+  }
+
+  const { type, value, reason, expiresAt, duration } = req.body || {};
+
+  if (!type || !value) {
+    return res.status(400).json({ error: 'Type and value are required' });
+  }
+
+  let finalExpiresAt = null;
+  if (duration && typeof duration === 'number' && duration > 0) {
+    finalExpiresAt = Date.now() + duration * 1000;
+  } else if (expiresAt) {
+    finalExpiresAt = new Date(expiresAt).getTime();
+    if (isNaN(finalExpiresAt)) {
+      return res.status(400).json({ error: 'Invalid expiresAt date' });
+    }
+  }
+
+  const result = blacklistManager.addEntry(req.params.channelId, {
+    type,
+    value,
+    reason: reason || '',
+    expiresAt: finalExpiresAt,
+    createdBy: 'dj'
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  res.json({ success: true, entry: result.entry });
+});
+
+app.delete('/api/channels/:channelId/blacklist/:entryId', (req, res) => {
+  const channel = channelManager.getChannel(req.params.channelId);
+  if (!channel) {
+    return res.status(404).json({ error: 'Channel not found' });
+  }
+
+  const result = blacklistManager.removeEntry(req.params.channelId, req.params.entryId);
+  if (!result.success) {
+    return res.status(404).json({ error: result.error });
+  }
+
+  res.json({ success: true, entry: result.entry });
+});
+
+app.delete('/api/channels/:channelId/blacklist', (req, res) => {
+  const channel = channelManager.getChannel(req.params.channelId);
+  if (!channel) {
+    return res.status(404).json({ error: 'Channel not found' });
+  }
+
+  blacklistManager.clearChannel(req.params.channelId);
+  res.json({ success: true });
+});
+
+app.get('/api/blacklist/export', (req, res) => {
+  const { channelId } = req.query;
+  if (channelId) {
+    const channel = channelManager.getChannel(channelId);
+    if (!channel) {
+      return res.status(404).json({ error: 'Channel not found' });
+    }
+  }
+  const entries = blacklistManager.exportEntries(channelId || null);
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="blacklist-${channelId || 'all'}-${Date.now()}.json"`);
+  res.json(entries);
+});
+
+app.post('/api/channels/:channelId/blacklist/import', (req, res) => {
+  const channel = channelManager.getChannel(req.params.channelId);
+  if (!channel) {
+    return res.status(404).json({ error: 'Channel not found' });
+  }
+
+  const { entries } = req.body || {};
+  if (!Array.isArray(entries)) {
+    return res.status(400).json({ error: 'Entries must be an array' });
+  }
+
+  const result = blacklistManager.importEntries(req.params.channelId, entries);
+
+  if (result.imported > 0) {
+    const removed = audioStreamer.removeStreamsByBlacklistCheck(req.params.channelId, blacklistManager, (userId, ip, entry) => {
+      wsServer.sendBlacklistNotification(req.params.channelId, userId, ip, entry);
+    });
+    if (removed > 0) {
+      console.log(`[Blacklist] Disconnected ${removed} listener(s) from channel ${req.params.channelId} due to import`);
+    }
+  }
+
+  res.json(result);
+});
+
+app.get('/api/blacklist/check', (req, res) => {
+  const { channelId, ip, userId } = req.query;
+  if (!channelId) {
+    return res.status(400).json({ error: 'channelId is required' });
+  }
+  const channel = channelManager.getChannel(channelId);
+  if (!channel) {
+    return res.status(404).json({ error: 'Channel not found' });
+  }
+  const result = blacklistManager.isBlacklisted(channelId, ip || null, userId || null);
+  res.json(result);
+});
+
 app.listen(config.port, () => {
   console.log(`\n=== 内网音频广播服务已启动 ===`);
   console.log(`HTTP 服务端口: ${config.port}`);
@@ -254,6 +410,7 @@ app.listen(config.port, () => {
 process.on('SIGINT', () => {
   console.log('\n正在关闭服务...');
   audioStreamer.shutdown();
+  blacklistManager.shutdown();
   wsServer.stop();
   process.exit(0);
 });

@@ -14,6 +14,7 @@ class WebSocketServer {
 
     this.wss.on('connection', (ws) => {
       let clientChannel = null;
+      let clientUserId = null;
 
       ws.on('message', (message) => {
         try {
@@ -22,13 +23,17 @@ class WebSocketServer {
           switch (data.action) {
             case 'join':
               clientChannel = data.channelId;
+              clientUserId = data.userId || null;
               ws._channelId = clientChannel;
+              ws._userId = clientUserId;
               this.sendChannelStatus(ws, clientChannel);
               break;
 
             case 'leave':
               clientChannel = null;
+              clientUserId = null;
               ws._channelId = null;
+              ws._userId = null;
               break;
 
             case 'control':
@@ -131,6 +136,46 @@ class WebSocketServer {
     this.wss.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(data);
+      }
+    });
+  }
+
+  sendBlacklistNotification(channelId, userId, ip, entry) {
+    const message = {
+      type: 'blacklisted',
+      channelId: channelId,
+      reason: entry.reason || '',
+      expiresAt: entry.expiresAt || null,
+      entryType: entry.type
+    };
+    const data = JSON.stringify(message);
+    this.wss.clients.forEach((client) => {
+      if (client.readyState !== WebSocket.OPEN) return;
+      if (channelId && client._channelId !== channelId) return;
+      const matchUserId = userId && client._userId === userId;
+      const matchChannel = client._channelId === channelId;
+      if (matchUserId || (matchChannel && ip && !client._userId)) {
+        try {
+          client.send(data);
+        } catch (e) {}
+      }
+    });
+  }
+
+  broadcastBlacklistToChannel(channelId, entry) {
+    const message = {
+      type: 'blacklisted',
+      channelId: channelId,
+      reason: entry.reason || '',
+      expiresAt: entry.expiresAt || null,
+      entryType: entry.type
+    };
+    const data = JSON.stringify(message);
+    this.wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN && client._channelId === channelId) {
+        try {
+          client.send(data);
+        } catch (e) {}
       }
     });
   }
